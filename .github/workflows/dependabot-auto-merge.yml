@@ -21,4 +21,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge "${PR_URL}" --auto --squash --delete-branch
+        run: |
+          if gh pr diff "${PR_URL}" --name-only | grep -q '^.github/workflows/'; then
+            echo 'Dependabot changes to GitHub Actions workflows require manual merge.'
+            exit 0
+          fi
+          gh pr merge "${PR_URL}" --auto --squash --delete-branch
