@@ -1,0 +1,81 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: vaultwarden
+  annotations:
+    run.googleapis.com/maxScale: "1"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "1"
+        autoscaling.knative.dev/minScale: "0"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 20
+      serviceAccountName: REPLACE_SERVICE_ACCOUNT
+      timeoutSeconds: 300
+      containers:
+        - name: vaultwarden
+          image: REPLACE_IMAGE_URL
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: GCS_BUCKET
+              value: REPLACE_GCS_BUCKET
+            - name: LITESTREAM_REPLICA_URL
+              value: gs://REPLACE_GCS_BUCKET/vaultwarden/replica
+            - name: CONTROL_PREFIX
+              value: vaultwarden/control
+            - name: DATABASE_PATH
+              value: /var/lib/vaultwarden/db.sqlite3
+            - name: LITESTREAM_SOCKET
+              value: /var/run/litestream.sock
+            - name: DATA_FOLDER
+              value: /mnt/vaultwarden-data
+            - name: TMP_FOLDER
+              value: /var/lib/vaultwarden/tmp
+            - name: TEMPLATES_FOLDER
+              value: /var/lib/vaultwarden/templates
+            - name: ICON_CACHE_FOLDER
+              value: /var/lib/vaultwarden/icon-cache
+            - name: DOMAIN
+              value: https://REPLACE_DOMAIN
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /_vwshim/readyz
+              port: 8080
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /_vwshim/healthz
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: local-state
+              mountPath: /var/lib/vaultwarden
+            - name: persistent-data
+              mountPath: /mnt/vaultwarden-data
+      volumes:
+        - name: local-state
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        - name: persistent-data
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: false
+            volumeAttributes:
+              bucketName: REPLACE_GCS_BUCKET
+              mountOptions: only-dir=vaultwarden/data,metadata-cache-ttl-secs=5

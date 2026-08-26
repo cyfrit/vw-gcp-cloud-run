@@ -1,0 +1,23 @@
+logging:
+  level: info
+
+socket:
+  enabled: true
+  path: ${LITESTREAM_SOCKET}
+  permissions: 0600
+
+shutdown-sync-timeout: 7s
+shutdown-sync-interval: 250ms
+
+snapshot:
+  interval: 24h
+  retention: 168h
+
+dbs:
+  - path: ${DATABASE_PATH}
+    monitor-interval: 1s
+    checkpoint-interval: 1m
+    busy-timeout: 5s
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
+      sync-interval: 1s

@@ -1,0 +1,114 @@
+name: Update upstream images
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-upstreams
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.repository == 'cyfrit/vw-gcp-cloud-run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare automation branch
+        run: |
+          branch=automation/update-upstreams
+          git fetch origin main
+          git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}" || true
+          git switch -C "${branch}" origin/main
+
+      - name: Resolve current upstream releases and amd64 image digests
+        run: bash scripts/update-upstreams.sh
+
+      - name: Open update pull request
+        id: pull-request
+        run: |
+          if git diff --quiet -- Dockerfile THIRD_PARTY_NOTICES.md; then
+            echo 'changed=false' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          branch=automation/update-upstreams
+          pr_url="$(gh pr list --base main --head "${branch}" --state open --json url --jq '.[0].url')"
+          old_remote="$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null || true)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Dockerfile THIRD_PARTY_NOTICES.md
+          git commit -m 'chore: update upstream images'
+          if [ -n "${old_remote}" ]; then
+            git push --force-with-lease="refs/heads/${branch}:${old_remote}" origin "HEAD:refs/heads/${branch}"
+          else
+            git push origin "HEAD:refs/heads/${branch}"
+          fi
+
+          if [ -z "${pr_url}" ]; then
+            pr_url="$(gh pr create \
+              --base main \
+              --head "${branch}" \
+              --title 'chore: update upstream images' \
+              --body 'Automated update of Vaultwarden and/or Litestream release tags and pinned linux/amd64 digests.')"
+          fi
+          echo 'changed=true' >> "${GITHUB_OUTPUT}"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+          echo "pr_url=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run CI on the update branch
+        if: steps.pull-request.outputs.changed == 'true'
+        id: ci
+        env:
+          BRANCH: ${{ steps.pull-request.outputs.branch }}
+        run: |
+          gh workflow run ci.yml --ref "${BRANCH}"
+          for attempt in $(seq 1 30); do
+            run_id="$(gh run list \
+              --workflow ci.yml \
+              --branch "${BRANCH}" \
+              --event workflow_dispatch \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${run_id}" ]; then
+              echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'CI dispatch did not create a run within 60 seconds.' >&2
+          exit 1
+
+      - name: Require successful CI
+        if: steps.pull-request.outputs.changed == 'true'
+        env:
+          RUN_ID: ${{ steps.ci.outputs.run_id }}
+        run: gh run watch "${RUN_ID}" --exit-status
+
+      - name: Merge verified update and publish it
+        if: steps.pull-request.outputs.changed == 'true'
+        env:
+          PR_URL: ${{ steps.pull-request.outputs.pr_url }}
+        run: |
+          gh pr merge "${PR_URL}" --squash --delete-branch
+          for attempt in $(seq 1 30); do
+            if [ "$(gh pr view "${PR_URL}" --json state --jq .state)" = MERGED ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$(gh pr view "${PR_URL}" --json state --jq .state)" = MERGED
+          gh workflow run publish.yml --ref main
