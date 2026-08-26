@@ -66,6 +66,15 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Make the published container package public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          package_name="${GITHUB_REPOSITORY#*/}"
+          gh api --method PATCH \
+            "/user/packages/container/${package_name}" \
+            -f visibility=public
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
