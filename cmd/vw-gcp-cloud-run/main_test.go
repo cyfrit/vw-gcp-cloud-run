@@ -121,6 +121,61 @@ func TestLeasePreconditionFailureReportsOwnershipLoss(t *testing.T) {
 	}
 }
 
+func TestExpiredLocalLeaseRevalidatesSameGeneration(t *testing.T) {
+	store := newMemoryStore()
+	lease := testLease(store, "first")
+	if err := lease.acquire(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	lease.mu.Lock()
+	lease.lastRenewal = time.Now().Add(-lease.localValidityWindow())
+	lease.mu.Unlock()
+	if err := lease.ensureValid(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !lease.valid() {
+		t.Fatal("lease did not become valid after generation-checked renewal")
+	}
+}
+
+func TestExpiredLocalLeaseRejectsRequestAfterGenerationLoss(t *testing.T) {
+	store := newMemoryStore()
+	lease := testLease(store, "first")
+	if err := lease.acquire(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	lease.mu.Lock()
+	lease.lastRenewal = time.Now().Add(-lease.localValidityWindow())
+	lease.mu.Unlock()
+	store.mu.Lock()
+	key := objectKey("bucket", "control/lease.json")
+	obj := store.objects[key]
+	obj.generation++
+	store.objects[key] = obj
+	store.mu.Unlock()
+
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalled = true
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	state := &proxyState{lease: lease}
+	state.ready.Store(true)
+	handler := newProxy(state, target, &syncBarrier{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if upstreamCalled {
+		t.Fatal("request reached upstream after lease generation changed")
+	}
+}
+
 func TestExpiredLeaseCanBeReplaced(t *testing.T) {
 	store := newMemoryStore()
 	first := testLease(store, "first")

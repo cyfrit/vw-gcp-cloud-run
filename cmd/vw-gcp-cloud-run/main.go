@@ -412,6 +412,41 @@ func (m *leaseManager) clearLease() {
 	m.mu.Unlock()
 }
 
+// ensureValid revalidates an existing lease with a generation-checked write.
+// Cloud Run can suspend CPU between requests, so the local validity window may
+// expire even though this process still owns the remote object.
+func (m *leaseManager) ensureValid(ctx context.Context) error {
+	if m.valid() {
+		return nil
+	}
+
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	if m.valid() {
+		return nil
+	}
+
+	m.mu.RLock()
+	generation := m.generation
+	m.mu.RUnlock()
+	if generation == 0 {
+		return fmt.Errorf("lease has no active generation")
+	}
+
+	renewCtx, cancel := context.WithTimeout(ctx, min(m.renewInterval, gcsRequestTimeout))
+	defer cancel()
+	updated, err := m.store.put(renewCtx, m.bucket, m.leaseObject, m.payload(), generation)
+	if errors.Is(err, errPrecondition) {
+		m.clearLease()
+		return fmt.Errorf("lease ownership lost: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate lease: %w", err)
+	}
+	m.setLease(updated.generation)
+	return nil
+}
+
 func (m *leaseManager) acquire(ctx context.Context) error {
 	for {
 		obj, err := m.store.get(ctx, m.bucket, m.leaseObject)
@@ -539,17 +574,11 @@ func (m *leaseManager) renewAndCheck(ctx context.Context) *leaseEvent {
 
 	m.mu.RLock()
 	generation := m.generation
-	lastRenewal := m.lastRenewal
 	m.mu.RUnlock()
 	if generation == 0 {
 		return &leaseEvent{err: fmt.Errorf("lease has no active generation"), stillOwner: false}
 	}
-	renewDeadline := lastRenewal.Add(m.localValidityWindow())
-	if !time.Now().Before(renewDeadline) {
-		m.clearLease()
-		return &leaseEvent{err: fmt.Errorf("lease renewal deadline exceeded"), stillOwner: false}
-	}
-	renewCtx, cancelRenew := context.WithDeadline(ctx, renewDeadline)
+	renewCtx, cancelRenew := context.WithTimeout(ctx, min(m.renewInterval, gcsRequestTimeout))
 	updated, err := m.store.put(renewCtx, m.bucket, m.leaseObject, m.payload(), generation)
 	cancelRenew()
 	if err == nil {
@@ -559,11 +588,8 @@ func (m *leaseManager) renewAndCheck(ctx context.Context) *leaseEvent {
 		return &leaseEvent{err: fmt.Errorf("lease ownership lost: %w", err), stillOwner: false}
 	} else if ctx.Err() != nil {
 		return nil
-	} else if !time.Now().Before(renewDeadline) || errors.Is(err, context.DeadlineExceeded) {
-		m.clearLease()
-		return &leaseEvent{err: fmt.Errorf("lease renewal deadline exceeded: %w", err), stillOwner: false}
 	} else {
-		slog.Warn("lease renewal failed; retrying before TTL", "error", err)
+		slog.Warn("lease renewal failed; requests remain blocked after local expiry", "error", err)
 		return nil
 	}
 
@@ -796,14 +822,14 @@ func newProxy(state *proxyState, target *url.URL, barrier *syncBarrier) http.Han
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if isMutation(resp.Request.Method) {
-			if !state.lease.valid() {
-				return fmt.Errorf("lease is no longer valid")
+			if err := state.lease.ensureValid(resp.Request.Context()); err != nil {
+				return err
 			}
 			if err := barrier.sync(resp.Request.Context()); err != nil {
 				return err
 			}
-			if !state.lease.valid() {
-				return fmt.Errorf("lease expired while waiting for remote sync")
+			if err := state.lease.ensureValid(resp.Request.Context()); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -815,14 +841,14 @@ func newProxy(state *proxyState, target *url.URL, barrier *syncBarrier) http.Han
 			w.WriteHeader(http.StatusNoContent)
 			return
 		case readyPath:
-			if state.ready.Load() && state.lease.valid() {
+			if state.ready.Load() && state.lease.ensureValid(r.Context()) == nil {
 				w.WriteHeader(http.StatusNoContent)
 			} else {
 				http.Error(w, "not ready", http.StatusServiceUnavailable)
 			}
 			return
 		}
-		if !state.ready.Load() || !state.lease.valid() {
+		if !state.ready.Load() || state.lease.ensureValid(r.Context()) != nil {
 			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}

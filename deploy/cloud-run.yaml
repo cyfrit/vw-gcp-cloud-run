@@ -10,7 +10,7 @@ spec:
       annotations:
         autoscaling.knative.dev/maxScale: "1"
         autoscaling.knative.dev/minScale: "0"
-        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/cpu-throttling: "true"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: "true"
     spec:
@@ -30,6 +30,10 @@ spec:
               value: gs://REPLACE_GCS_BUCKET/vaultwarden/replica
             - name: CONTROL_PREFIX
               value: vaultwarden/control
+            - name: LEASE_TTL
+              value: 45s
+            - name: LEASE_RENEW_INTERVAL
+              value: 10s
             - name: DATABASE_PATH
               value: /var/lib/vaultwarden/db.sqlite3
             - name: LITESTREAM_SOCKET
@@ -44,6 +48,8 @@ spec:
               value: /var/lib/vaultwarden/icon-cache
             - name: DOMAIN
               value: https://REPLACE_DOMAIN
+            - name: SIGNUPS_ALLOWED
+              value: "false"
           resources:
             limits:
               cpu: "1"
@@ -78,4 +84,4 @@ spec:
             readOnly: false
             volumeAttributes:
               bucketName: REPLACE_GCS_BUCKET
-              mountOptions: only-dir=vaultwarden/data,metadata-cache-ttl-secs=5
+              mountOptions: only-dir=vaultwarden/data,metadata-cache-ttl-secs=60
