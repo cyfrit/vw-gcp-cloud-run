@@ -1,5 +1,5 @@
 logging:
-  level: info
+  level: warn
 
 socket:
   enabled: true
@@ -20,4 +20,4 @@ dbs:
     busy-timeout: 5s
     replica:
       url: ${LITESTREAM_REPLICA_URL}
-      sync-interval: 1s
+      sync-interval: 30s
